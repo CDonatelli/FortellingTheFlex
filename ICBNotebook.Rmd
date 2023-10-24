@@ -1,0 +1,645 @@
+---
+title: "Donatelli et.al. 2021: Stats and Figures"
+output: html_notebook
+---
+
+      You need Rtools I think to install some of these packages
+https://cran.r-project.org/bin/windows/Rtools/rtools43/rtools.html
+
+      You also need BiocManager to install mixOmics
+https://cran.r-project.org/web/packages/BiocManager/vignettes/BiocManager.html
+
+Libraries
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+# stats things
+library(caret)
+## BiocManager::install('mixOmics')
+library(mixOmics)
+## BiocManager::install("ropls")
+library(ropls)
+library(bbmle)   #for AICtab()
+library(car)     #for Anova()
+library(lme4)
+
+# organizing
+library(Rmisc)
+library(readxl)
+library(tidyverse)
+library(here)
+library(broom)
+library(tidyr)
+library(dplyr)
+
+# for plotting
+library(ggplot2)
+library(ggthemes)
+library(RColorBrewer)
+library(cowplot)
+
+# for plotting on a tree
+library("ape")
+library("phytools")
+```
+
+# Functions
+```{r}
+LDAModel <- function(data){
+  names(data)[1] <- "Mode"
+  data<-na.omit(data)
+  as.factor(data$Mode)
+  
+  set.seed(123)
+  training.samples <- data$Mode %>%
+  createDataPartition(p = 0.8, list = FALSE)
+  train.data <- data[training.samples, ]
+  test.data <- data[-training.samples, ]
+  
+  # Estimate preprocessing parameters
+  preproc.param <- train.data %>% 
+  preProcess(method = c("center", "scale"))
+
+  # Transform the data using the estimated parameters
+  train.transformed <- preproc.param %>% predict(train.data)
+  test.transformed <- preproc.param %>% predict(test.data)
+
+  # Fit the model
+  model <- lda(Mode~., data = train.transformed)
+  # Make predictions
+  predictions <- predict(model, test.transformed, method = "predictive")
+  # Model accuracy
+  modelAccuracy <- mean(predictions$class==test.transformed$Mode)
+  prop = round((model$svd^2/sum(model$svd^2))*100, digits = 2)
+  
+  out <- list(model, train.transformed, modelAccuracy, prop)
+  return(out)
+}
+
+PLSDAModel <- function(data){
+  names(data)[1] <- "Mode"
+  data<-na.omit(data)
+  data$Mode<- as.factor(data$Mode)
+  
+  training.samples <- data$Mode %>%
+    createDataPartition(p = 0.85, list = FALSE)
+    train.data <- data[training.samples, ]
+    test.data <- data[-training.samples, ]
+  
+  # opls.Data <- opls(as.matrix(train.data[2:ncol(train.data)]), train.data$Mode)
+  plsda.data<- plsda(as.matrix(train.data[2:ncol(train.data)]), train.data$Mode)
+  
+  predictions <- predict(plsda.data, test.data[2:ncol(test.data)], method = "predictive")
+  
+  modelAccuracy <- mean(predictions$class$mahalanobis.dist[,1]==test.data$Mode)
+  
+  out<-list(plsda.data, predictions, modelAccuracy)
+  
+}
+```
+
+# Read In Data
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Material testing data for real fish
+vertData <- read_csv("LayanneFHL2020.csv")
+vertData[vertData == 0] <- NA
+
+# Measuremtnts from CT scans
+vertMeasurementsAll <- read_csv("MergedWithNewCoordinate.csv")
+vertMeasurementsAll[vertMeasurementsAll == 0] <- NA
+
+my.data <- read_excel("MasterVert_Measurements_forCassandra.xlsm", 
+    sheet = "VertMeasurements")
+my.data <- my.data[c(1:4, 11:16,33:40)]
+my.data <- na.omit(subset(my.data, Indiv == 1))
+```
+
+# Models for bending real verts
+All Bending Data
+            Sum Sq  Df F value    Pr(>F)    
+PercSquish  1.2145   1  17.427 4.795e-05 ***
+Residuals  11.6382 167 
+
+Real Verts
+            Sum Sq Df F value    Pr(>F)    
+PercSquish 3.00728  1  118.43 3.091e-13 ***
+Residuals  0.96496 38  
+```{r}
+bendingModelAll <- lm(Npermm ~ PercSquish, data = vertData)
+  # Anova(bendingModelAll)
+
+realVerts <- filter(vertData, Type == "Real")
+bendingModelReal <- lm(Npermm ~ PercSquish, data = realVerts)
+  # Anova(bendingModelReal)
+
+vertMeasurementsAll = mutate(vertMeasurementsAll, predNmm = coef(bendingModelReal)[1] + coef(bendingModelReal)[2]*PercSquish)
+my.data = mutate(my.data, predNmm = coef(bendingModelReal)[1] + coef(bendingModelReal)[2]*PercSquish)
+```
+
+
+# Subset dataset for LDA to avoid colinearity
+```{r}
+  vertMeasurements <- filter(vertMeasurementsAll, Position != "20")
+  vertMeasurements <- filter(vertMeasurements, Position != "30")
+  vertMeasurements <- filter(vertMeasurements, Position != "40")
+  vertMeasurements <- filter(vertMeasurements, Position != "60")
+  vertMeasurements <- filter(vertMeasurements, Position != "80")
+```
+
+# Calculate coefifients of fit lines along the body
+```{r}
+library(dplyr)
+
+VertAmp <- filter(vertMeasurements, Amp != "NA")
+VertWob <- filter(vertMeasurements, Wobble != "NA")
+
+ PLSdataFrameAll <- vertMeasurementsAll %>%
+    group_by(Species, Individual) %>% #for each individual...
+    summarize(X.CBL.I = lm(CBL ~ poly(Position, 2)) %>% coef() %>% .[1],  #fit a polynomial model, then get the coeficient in slot 1
+              X.CBL.p1 = lm(CBL ~ poly(Position, 2)) %>% coef() %>% .[2], #...slot 2
+              X.CBL.p2 = lm(CBL ~ poly(Position, 2)) %>% coef() %>% .[3], #...slot 3
+              X.Dant.I = lm(Dant ~ poly(Position, 2)) %>% coef() %>% .[1],
+              X.Dant.p1 = lm(Dant ~ poly(Position, 2)) %>% coef() %>% .[2],
+              X.Dant.p2 = lm(Dant ~ poly(Position, 2)) %>% coef() %>% .[3],
+              X.Dpost.I = lm(Dpost ~ poly(Position, 2)) %>% coef() %>% .[1],
+              X.Dpost.p1 = lm(Dpost ~ poly(Position, 2)) %>% coef() %>% .[2],
+              X.Dpost.p2 = lm(Dpost ~ poly(Position, 2)) %>% coef() %>% .[3],
+              X.d.I = lm(d ~ poly(Position, 2)) %>% coef() %>% .[1],
+              X.d.p1 = lm(d ~ poly(Position, 2)) %>% coef() %>% .[2],
+              X.d.p2 = lm(d ~ poly(Position, 2)) %>% coef() %>% .[3],
+              X.alphaAnt.I = lm(alphaAnt ~ poly(Position, 2)) %>% coef() %>% .[1],
+              X.alphaAnt.p1 = lm(alphaAnt ~ poly(Position, 2)) %>% coef() %>% .[2],
+              X.alphaAnt.p2 = lm(alphaAnt ~ poly(Position, 2)) %>% coef() %>% .[3],
+              X.alphaPost.I = lm(alphaPost ~ poly(Position, 2)) %>% coef() %>% .[1],
+              X.alphaPost.p1 = lm(alphaPost ~ poly(Position, 2)) %>% coef() %>% .[2],
+              X.alphaPost.p2 = lm(alphaPost ~ poly(Position, 2)) %>% coef() %>% .[3],
+              X.perc.I = lm(PercSquish ~ poly(Position, 2)) %>% coef() %>% .[1],
+              X.perc.p1 = lm(PercSquish ~ poly(Position, 2)) %>% coef() %>% .[2],
+              X.perc.p2 = lm(PercSquish ~ poly(Position, 2)) %>% coef() %>% .[3],
+              Mode = first(Mode),
+              Habitat = first(Habitat),
+              Shape = first(Shape))
+ 
+PLSdataFrameAmp <- VertAmp %>%
+    group_by(Species, Individual) %>% #for each individual...
+    summarize(X.CBL.I = lm(CBL ~ poly(Position, 2)) %>% coef() %>% .[1],  #fit a polynomial model, then get the coeficient in slot 1
+              X.CBL.p1 = lm(CBL ~ poly(Position, 2)) %>% coef() %>% .[2], #...slot 2
+              X.CBL.p2 = lm(CBL ~ poly(Position, 2)) %>% coef() %>% .[3], #...slot 3
+              X.Dant.I = lm(Dant ~ poly(Position, 2)) %>% coef() %>% .[1],
+              X.Dant.p1 = lm(Dant ~ poly(Position, 2)) %>% coef() %>% .[2],
+              X.Dant.p2 = lm(Dant ~ poly(Position, 2)) %>% coef() %>% .[3],
+              X.Dpost.I = lm(Dpost ~ poly(Position, 2)) %>% coef() %>% .[1],
+              X.Dpost.p1 = lm(Dpost ~ poly(Position, 2)) %>% coef() %>% .[2],
+              X.Dpost.p2 = lm(Dpost ~ poly(Position, 2)) %>% coef() %>% .[3],
+              X.d.I = lm(d ~ poly(Position, 2)) %>% coef() %>% .[1],
+              X.d.p1 = lm(d ~ poly(Position, 2)) %>% coef() %>% .[2],
+              X.d.p2 = lm(d ~ poly(Position, 2)) %>% coef() %>% .[3],
+              X.alphaAnt.I = lm(alphaAnt ~ poly(Position, 2)) %>% coef() %>% .[1],
+              X.alphaAnt.p1 = lm(alphaAnt ~ poly(Position, 2)) %>% coef() %>% .[2],
+              X.alphaAnt.p2 = lm(alphaAnt ~ poly(Position, 2)) %>% coef() %>% .[3],
+              X.alphaPost.I = lm(alphaPost ~ poly(Position, 2)) %>% coef() %>% .[1],
+              X.alphaPost.p1 = lm(alphaPost ~ poly(Position, 2)) %>% coef() %>% .[2],
+              X.alphaPost.p2 = lm(alphaPost ~ poly(Position, 2)) %>% coef() %>% .[3],
+              X.perc.I = lm(PercSquish ~ poly(Position, 2)) %>% coef() %>% .[1],
+              X.perc.p1 = lm(PercSquish ~ poly(Position, 2)) %>% coef() %>% .[2],
+              X.perc.p2 = lm(PercSquish ~ poly(Position, 2)) %>% coef() %>% .[3],
+              Mode = first(Mode),
+              Habitat = first(Habitat),
+              Shape = first(Shape),
+              Y.Amp.I = lm(Amp ~ poly(Position, 1)) %>% coef() %>% .[1],
+              Y.Amp.p1 = lm(Amp ~ poly(Position, 1)) %>% coef() %>% .[2],
+              Y.Amp.mean = mean(Amp))
+
+ PLSdataFrameWob <- VertWob %>%
+    group_by(Species, Individual) %>% #for each individual...
+    summarize(X.CBL.I = lm(CBL ~ poly(Position, 2)) %>% coef() %>% .[1],  #fit a polynomial model, then get the coeficient in slot 1
+              X.CBL.p1 = lm(CBL ~ poly(Position, 2)) %>% coef() %>% .[2], #...slot 2
+              X.CBL.p2 = lm(CBL ~ poly(Position, 2)) %>% coef() %>% .[3], #...slot 3
+              X.Dant.I = lm(Dant ~ poly(Position, 2)) %>% coef() %>% .[1],
+              X.Dant.p1 = lm(Dant ~ poly(Position, 2)) %>% coef() %>% .[2],
+              X.Dant.p2 = lm(Dant ~ poly(Position, 2)) %>% coef() %>% .[3],
+              X.Dpost.I = lm(Dpost ~ poly(Position, 2)) %>% coef() %>% .[1],
+              X.Dpost.p1 = lm(Dpost ~ poly(Position, 2)) %>% coef() %>% .[2],
+              X.Dpost.p2 = lm(Dpost ~ poly(Position, 2)) %>% coef() %>% .[3],
+              X.d.I = lm(d ~ poly(Position, 2)) %>% coef() %>% .[1],
+              X.d.p1 = lm(d ~ poly(Position, 2)) %>% coef() %>% .[2],
+              X.d.p2 = lm(d ~ poly(Position, 2)) %>% coef() %>% .[3],
+              X.alphaAnt.I = lm(alphaAnt ~ poly(Position, 2)) %>% coef() %>% .[1],
+              X.alphaAnt.p1 = lm(alphaAnt ~ poly(Position, 2)) %>% coef() %>% .[2],
+              X.alphaAnt.p2 = lm(alphaAnt ~ poly(Position, 2)) %>% coef() %>% .[3],
+              X.alphaPost.I = lm(alphaPost ~ poly(Position, 2)) %>% coef() %>% .[1],
+              X.alphaPost.p1 = lm(alphaPost ~ poly(Position, 2)) %>% coef() %>% .[2],
+              X.alphaPost.p2 = lm(alphaPost ~ poly(Position, 2)) %>% coef() %>% .[3],
+              X.perc.I = lm(PercSquish ~ poly(Position, 2)) %>% coef() %>% .[1],
+              X.perc.p1 = lm(PercSquish ~ poly(Position, 2)) %>% coef() %>% .[2],
+              X.perc.p2 = lm(PercSquish ~ poly(Position, 2)) %>% coef() %>% .[3],
+              Mode = first(Mode),
+              Habitat = first(Habitat),
+              Shape = first(Shape),
+              Y.Wob.I = lm(Wobble ~ poly(Position, 1)) %>% coef() %>% .[1],
+              Y.Wob.p1 = lm(Wobble ~ poly(Position, 1)) %>% coef() %>% .[2],
+              Y.Wob.mean = mean(Wobble),
+              Y.G.I = lm(G ~ poly(Position, 1)) %>% coef() %>% .[1],
+              Y.G.p1 = lm(G ~ poly(Position, 1)) %>% coef() %>% .[2],
+              Y.G.mean = mean(G),
+              Y.GJ.I = lm(GJ ~ poly(Position, 1)) %>% coef() %>% .[1],
+              Y.GJ.p1 = lm(GJ ~ poly(Position, 1)) %>% coef() %>% .[2],
+              Y.GJ.mean = mean(GJ))
+```
+
+# LME on Measurements
+```{r}
+VertAmp <- filter(vertMeasurements, Amp != "NA")
+VertWob <- filter(vertMeasurements, Wobble != "NA")
+
+dat <- VertAmp[14:19]
+scaled.dat <- scale(dat, center = FALSE)
+VertAmpModel <- cbind(VertAmp[c(1:3,10)], scaled.dat)
+
+ampLM <- lmer(Amp ~ Dpost*alphaPost+Dant*alphaAnt+CBL+d+
+                (1|Individual)+(1|Species),
+              VertAmpModel, na.action = na.omit)
+  Anova(ampLM)
+
+dat <- VertWob[14:19]
+scaled.dat <- scale(dat, center = FALSE)
+VertWobModel <- cbind(VertWob[c(1:3,11)], scaled.dat)
+
+wobLM <- lmer(Wobble ~ Dpost*alphaPost+Dant*alphaAnt+CBL+d+
+                (1|Individual)+(1|Species),
+              VertWobModel, na.action = na.omit)
+  Anova(wobLM)
+  
+VertGJModel <- cbind(VertWob[c(1:3,13)], scaled.dat)
+GJLM <- lmer(GJ ~ Dpost*alphaPost+Dant*alphaAnt+CBL+d+
+               (1|Individual),
+              VertGJModel, na.action = na.omit)
+  Anova(GJLM)
+  
+VertGModel <- cbind(VertWob[c(1:3,12)], scaled.dat)
+GLM1 <- lm(G ~ Dpost*alphaPost+Dant*alphaAnt+CBL+d,
+              VertGModel, na.action = na.omit)
+  Anova(GLM1)
+  
+rm(dat, scaled.dat)
+```
+
+# Rotate Vert Measurement Data
+```{r}
+fish <-
+  vertMeasurements %>%
+  select(c('Species', 'Individual', 'Habitat', 'Shape','Depth','Association', 'Mode', 'Position', 'CBL', 'd', 'alphaPost', 'alphaAnt', 'Dpost', 'Dant','ASquishAnt', 'ASquishPost', 'ABoneL', 'ABoneR', 'PercSquish', 'predNmm')) %>%
+  # "complete" the Pos column by filling in values that are missing for Species
+  # and individuals but present for others
+  complete(Position, nesting(Species, Individual)) %>%
+  arrange(Species, Individual, Position)
+
+fish <-
+  fish %>%
+  group_by(Species, Individual) %>%
+  fill(Habitat, Shape, Mode, Depth, Association, .direction='downup') %>%
+  ungroup()
+
+fish_full <-
+  fish %>%
+  group_by(Species, Individual) %>%
+  mutate_at(vars(d, Dpost, Dant, alphaPost, alphaAnt, CBL, ASquishAnt, ASquishPost, ABoneL, ABoneR, PercSquish, predNmm), ~ replace(.x, is.na(.x), mean(.x, na.rm=TRUE))) %>%
+  ungroup()
+
+fishRotated <-
+fish_full %>%
+  pivot_wider(names_from = Position, values_from = c('CBL', 'alphaPost', 'alphaAnt', 'd', 'Dpost','Dant', 'ASquishAnt', 'ASquishPost', 'ABoneL', 'ABoneR', 'PercSquish','predNmm'))
+
+rm(fish, fish_full)
+```
+
+# LDA on Vert Measurements
+```{r}
+# Linear = c(?, 8:25)          Mode = 7
+# Areas = c(?, 26:37)         Shape = 4
+# Perc = c(?, 38:40)          Habitat = 3
+# PredNmm = c(:, 41:43)
+
+## Habitat
+LDHabitat.L         <- LDAModel(fishRotated[c(3,c(8:25))])  # Linear Only
+LDHabitat.L.A       <- LDAModel(fishRotated[c(3,c(8:37))])  # Linear + Area
+LDHabitat.L.Pc      <- LDAModel(fishRotated[c(3,c(8:25, 38:40))])  # Linear + Perc 
+LDHabitat.L.Pd      <- LDAModel(fishRotated[c(3,c(8:25, 41:43))])  # Linear + Pred 
+
+HabitatVals <- matrix(1:12, nrow = 4, ncol = 3) 
+colnames(HabitatVals) <- c("Accuracy", "LD1", "LD2")
+rownames(HabitatVals) <- c("Linear", "L+Area", "L+Perc", "L+Pred")
+HabitatVals[1,] = c(LDHabitat.L[[3]], LDHabitat.L[[4]][1], LDHabitat.L[[4]][2]) 
+HabitatVals[2,] = c(LDHabitat.L.A[[3]], LDHabitat.L.A[[4]][1], LDHabitat.L.A[[4]][2]) 
+HabitatVals[3,] = c(LDHabitat.L.Pc[[3]], LDHabitat.L.Pc[[4]][1], LDHabitat.L.Pc[[4]][2]) 
+HabitatVals[4,] = c(LDHabitat.L.Pd[[3]], LDHabitat.L.Pd[[4]][1], LDHabitat.L.Pd[[4]][2]) 
+HabitatVals
+
+## Shape
+LDShape.L         <- LDAModel(fishRotated[c(4,c(8:25))])  # Linear Only
+LDShape.L.A       <- LDAModel(fishRotated[c(4,c(8:37))])  # Linear + Area
+LDShape.L.Pc      <- LDAModel(fishRotated[c(4,c(8:25, 38:40))])  # Linear + Perc 
+LDShape.L.Pd      <- LDAModel(fishRotated[c(4,c(8:25, 41:43))])  # Linear + Pred 
+
+ShapeVals <- matrix(1:12, nrow = 4, ncol = 3) 
+colnames(ShapeVals) <- c("Accuracy", "LD1", "LD2")
+rownames(ShapeVals) <- c("Linear", "L+Area", "L+Perc", "L+Pred")
+ShapeVals[1,] = c(LDShape.L[[3]], LDShape.L[[4]][1], LDShape.L[[4]][2]) 
+ShapeVals[2,] = c(LDShape.L.A[[3]], LDShape.L.A[[4]][1], LDShape.L.A[[4]][2]) 
+ShapeVals[3,] = c(LDShape.L.Pc[[3]], LDShape.L.Pc[[4]][1], LDShape.L.Pc[[4]][2]) 
+ShapeVals[4,] = c(LDShape.L.Pd[[3]], LDShape.L.Pd[[4]][1], LDShape.L.Pd[[4]][2]) 
+ShapeVals
+
+## Mode
+LDMode.L         <- LDAModel(fishRotated[c(7,c(8:25))])  # Linear Only
+LDMode.L.A       <- LDAModel(fishRotated[c(7,c(8:37))])  # Linear + Area
+LDMode.L.Pc      <- LDAModel(fishRotated[c(7,c(8:25, 38:40))])  # Linear + Perc 
+LDMode.L.Pd      <- LDAModel(fishRotated[c(7,c(8:25, 41:43))])  # Linear + Pred 
+
+ModeVals <- matrix(1:12, nrow = 4, ncol = 3) 
+colnames(ModeVals) <- c("Accuracy", "LD1", "LD2")
+rownames(ModeVals) <- c("Linear", "L+Area", "L+Perc", "L+Pred")
+ModeVals[1,] = c(LDMode.L[[3]], LDMode.L[[4]][1], LDMode.L[[4]][2]) 
+ModeVals[2,] = c(LDMode.L.A[[3]], LDMode.L.A[[4]][1], LDMode.L.A[[4]][2]) 
+ModeVals[3,] = c(LDMode.L.Pc[[3]], LDMode.L.Pc[[4]][1], LDMode.L.Pc[[4]][2]) 
+ModeVals[4,] = c(LDMode.L.Pd[[3]], LDMode.L.Pd[[4]][1], LDMode.L.Pd[[4]][2]) 
+ModeVals
+
+```
+
+# LDA Plots
+NOTE: If you get "lazy-load database 'keras.rdb' is corrupt" when running this section you just need to restart your R-Session
+```{r}
+Habitat.lda.data <- cbind(LDHabitat.L.A[[2]], predict(LDHabitat.L.A[[1]])$x)
+Shape.lda.data <- cbind(LDShape.L[[2]], predict(LDShape.L[[1]])$x)
+Mode.lda.data <- cbind(LDMode.L.A[[2]], predict(LDMode.L.A[[1]])$x)
+
+ggplot(Habitat.lda.data, aes(LD1, LD2)) +
+    geom_point(aes(color = Mode)) +
+    theme_classic()+
+    stat_ellipse(aes(color = Mode))+
+    scale_color_brewer(palette="Dark2")+
+    labs(color = "Habitat",
+         x = paste("LD1 (", LDHabitat.L.A[[4]][1], ")", sep=""),
+         y = paste("LD2 (", LDHabitat.L.A[[4]][2], ")", sep=""))+
+    theme(axis.text.x = element_text(size = 14),
+      text = element_text(size=20))
+
+ggplot(Shape.lda.data, aes(LD1, LD2)) +
+    geom_point(aes(color = Mode)) +
+    theme_classic()+
+    stat_ellipse(aes(color = Mode))+
+    scale_color_brewer(palette="Dark2")+
+    labs(color = "Shape",
+         x = paste("LD1 (", LDShape.L.A[[4]][1], ")", sep=""),
+         y = paste("LD2 (", LDShape.L.A[[4]][2], ")", sep=""))+
+    theme(axis.text.x = element_text(size = 14),
+      text = element_text(size=20))
+
+ggplot(Mode.lda.data, aes(LD1, LD2)) +
+    geom_point(aes(color = Mode)) +
+    theme_classic()+
+    stat_ellipse(aes(color = Mode))+
+    scale_color_brewer(palette="Dark2")+
+    labs(color = "Mode",
+         x = paste("LD1 (", LDMode.L.A[[4]][1], ")", sep=""),
+         y = paste("LD2 (", LDMode.L.A[[4]][2], ")", sep=""))+
+    theme(axis.text.x = element_text(size = 14),
+      text = element_text(size=20))
+#       ggsave("Habitat.eps", width = 18, height = 8, units = "cm")
+```
+
+# LDA on Coefficients
+```{r}
+# Linear = c(?, 8:25)          Mode = 24
+# Areas = c(?, 26:37)         Shape = 26
+# Perc = c(?, 38:40)          Habitat = 25
+# PredNmm = c(:, 41:43)
+
+## Habitat
+LDHabitat.Coef.Perc <- LDAModel(PLSdataFrameAll[c(25,c(3:23))])  # Linear Only
+LDMode.Coef.Perc <- LDAModel(PLSdataFrameAll[c(24,c(3:23))])  # Linear Only
+LDShape.Coef.Perc <- LDAModel(PLSdataFrameAll[c(26,c(3:23))])  # Linear Only
+
+LDHabitat.Coef <- LDAModel(PLSdataFrameAll[c(25,c(3:20))])  # Linear Only
+LDMode.Coef <- LDAModel(PLSdataFrameAll[c(24,c(3:20))])  # Linear Only
+LDShape.Coef <- LDAModel(PLSdataFrameAll[c(26,c(3:20))])  # Linear Only
+
+CoefVals <- matrix(1:18, nrow = 6, ncol = 3) 
+colnames(CoefVals) <- c("Accuracy", "LD1", "LD2")
+rownames(CoefVals) <- c("Habitat", "Mode", "Shape","HabitatPerc", "ModePerc", "ShapePerc")
+
+CoefVals[1,] = c(LDHabitat.Coef[[3]], LDHabitat.Coef[[4]][1], LDHabitat.Coef[[4]][2]) 
+CoefVals[2,] = c(LDMode.Coef[[3]], LDMode.Coef[[4]][1], LDMode.Coef[[4]][2]) 
+CoefVals[3,] = c(LDShape.Coef[[3]], LDShape.Coef[[4]][1], LDShape.Coef[[4]][2]) 
+CoefVals[4,] = c(LDHabitat.Coef.Perc[[3]], LDHabitat.Coef.Perc[[4]][1], LDHabitat.Coef.Perc[[4]][2]) 
+CoefVals[5,] = c(LDMode.Coef.Perc[[3]], LDMode.Coef.Perc[[4]][1], LDMode.Coef.Perc[[4]][2]) 
+CoefVals[6,] = c(LDShape.Coef.Perc[[3]], LDShape.Coef.Perc[[4]][1], LDShape.Coef.Perc[[4]][2])
+CoefVals
+
+scalingTable = matrix(nrow = 18, ncol = 6)
+rownames(scalingTable) <- row.names(LDMode.Coef[[1]]$scaling)
+colnames(scalingTable) <- c("Habitat LD1", "Habitat LD2", "Mode LD1", "Mode LD2",
+                            "Shape LD1", "Shape LD2")
+scalingTable[,1:2]   = LDHabitat.Coef[[1]]$scaling[,1:2]
+scalingTable[,3:4]   = LDMode.Coef[[1]]$scaling[,1:2]
+scalingTable[,5:6]   = LDShape.Coef[[1]]$scaling[,1:2]
+write.table(scalingTable, file = "scalingTable.csv", sep = ",")
+
+scalingTablePerc = matrix(nrow = 21, ncol = 6)
+rownames(scalingTablePerc) <- row.names(LDMode.Coef.Perc[[1]]$scaling)
+colnames(scalingTablePerc) <- c("P Habitat LD1", "P Habitat LD2", 
+                            "P Mode LD1", "P Mode LD2", "P Shape LD1", "P Shape LD2")
+scalingTablePerc[,1:2]   = LDHabitat.Coef.Perc[[1]]$scaling[,1:2]
+scalingTablePerc[,3:4]  = LDMode.Coef.Perc[[1]]$scaling[,1:2]
+scalingTablePerc[,5:6] = LDShape.Coef.Perc[[1]]$scaling[,1:2]
+write.table(scalingTablePerc, file = "scalingTablePerc.csv", sep = ",")
+```
+
+# LDA Coefficient Plots
+```{r}
+Habitat.lda.data <- cbind(LDHabitat.Coef[[2]], predict(LDHabitat.Coef.Perc[[1]])$x)
+Shape.lda.data <- cbind(LDShape.Coef[[2]], predict(LDShape.Coef.Perc[[1]])$x)
+Mode.lda.data <- cbind(LDMode.Coef[[2]], predict(LDMode.Coef.Perc[[1]])$x)
+
+p1.Hab<-ggplot(Habitat.lda.data, aes(LD1, LD2)) +
+    geom_point(aes(color = Mode)) +
+    theme_classic()+
+    stat_ellipse(aes(color = Mode), type = "t", level = 0.75)+
+    scale_color_brewer(palette="Dark2")+
+    labs(color = "Habitat",
+         x = paste("LD1 (", LDHabitat.Coef[[4]][1], ")", sep=""),
+         y = paste("LD2 (", LDHabitat.Coef[[4]][2], ")", sep=""))+
+    theme(axis.text.x = element_text(size = 14),
+      text = element_text(size=20))
+
+p1.Shp<-ggplot(Shape.lda.data, aes(LD1, LD2)) +
+    geom_point(aes(color = Mode)) +
+    theme_classic()+
+    stat_ellipse(aes(color = Mode), type = "t", level = 0.75)+
+    scale_color_brewer(palette="Dark2")+
+    labs(color = "Shape",
+         x = paste("LD1 (", LDShape.Coef[[4]][1], ")", sep=""),
+         y = paste("LD2 (", LDShape.Coef[[4]][2], ")", sep=""))+
+    theme(axis.text.x = element_text(size = 14),
+      text = element_text(size=20))
+
+p1.Mod<-ggplot(Mode.lda.data, aes(LD1, LD2)) +
+    geom_point(aes(color = Mode)) +
+    theme_classic()+
+    stat_ellipse(aes(color = Mode), type = "t", level = 0.75)+
+    scale_color_brewer(palette="Dark2")+
+    labs(color = "Mode",
+         x = paste("LD1 (", LDMode.Coef[[4]][1], ")", sep=""),
+         y = paste("LD2 (", LDMode.Coef[[4]][2], ")", sep=""))+
+    theme(axis.text.x = element_text(size = 14),
+      text = element_text(size=20))
+
+ggsave("LDACoefPlot_Habitat.eps", plot = p1.Hab, width = 15, height = 8, units = ("cm"))
+ggsave("LDACoefPlot_Mode.eps", plot = p1.Mod, width = 15, height = 8, units = ("cm"))
+ggsave("LDACoefPlot_Shape.eps", plot = p1.Shp, width = 15, height = 8, units = ("cm"))
+```
+
+# Morphology plot
+```{r}
+greys<-gray.colors(5, start = 0, end = 0.75)
+
+morphPlot <- filter(vertMeasurementsAll, (Species == "Ap.flavidus" |
+                                          Species == "Au.flavidus" |
+                                          Species == "C.aggregata" |
+                                          Species == "R.jordani"))
+
+p1<- ggplot(data = morphPlot, aes(x = Position, y = CBL, color = Species))+
+  geom_point()+
+  geom_smooth(method = "lm", se = FALSE, formula = y ~ x + I(x^2))+
+  xlab("Position") + ylab("Centra Length (BL)")+
+  scale_color_manual(values = greys)+
+  theme_classic()+
+  labs(color = "Species")+
+  theme(axis.text.x = element_text(size = 14),
+      text = element_text(size=18),
+      legend.position = "none")
+
+p2<- ggplot(data = morphPlot, aes(x = Position, y = d, color = Species))+
+  geom_point()+
+  geom_smooth(method = "lm", se = FALSE, formula = y ~ x + I(x^2))+
+  xlab("Position") + ylab("Foramen diameter (BL))")+
+  scale_color_manual(values = greys)+
+  theme_classic()+
+  labs(color = "Species")+
+  theme(axis.text.x = element_text(size = 14),
+      text = element_text(size=18),
+      legend.position = "none")
+
+p3<- ggplot(data = morphPlot, aes(x = Position, y = alphaPost, color = Species))+
+  geom_point()+
+  geom_smooth(method = "lm", se = FALSE, formula = y ~ x + I(x^2))+
+  xlab("Position") + ylab("Posterior cone angle (deg)")+
+  scale_color_manual(values = greys)+
+  theme_classic()+
+  labs(color = "Species")+
+  ylim(45,150)+
+  theme(axis.text.x = element_text(size = 14),
+      text = element_text(size=18))
+
+plot_grid(p1, p2, p3, labels = "auto", ncol = 3, rel_widths = c(1,1,2))
+
+ggsave("VariationInMorphology03.eps", width = 8.5, height = 2, units = "in")
+```
+
+# Read in Larger Fish Dataset for Tree Plot
+```{r}
+tree <- read.tree(file ="actinopt_12k_treePL.tre")
+
+# removes species from dataset that are not in tree
+my.data <- my.data[my.data$Species %in% tree$tip.label,] 
+
+tree <-drop.tip(tree,tree$tip.label[-match(my.data$Species, tree$tip.label)]) 
+# prunes tree to only include species in your data
+```
+
+# Clean and rotate data
+```{r}
+my.data.rotated <- filter(my.data, Pos != "20")
+my.data.rotated <- filter(my.data.rotated, Pos != "30")
+my.data.rotated <- filter(my.data.rotated, Pos != "40")
+my.data.rotated <- filter(my.data.rotated, Pos != "50")
+
+my.data.rotated <-
+  my.data.rotated %>%
+  select(c('Species', 'Habitat_FishBase', 'Pos', 'CBL', 'd', 'alphaPost', 'alphaAnt', 'Dpost', 'Dant', 'PercSquish',"predNmm"))
+
+my.data.rotated <-
+  my.data.rotated %>%
+  group_by(Species) %>%
+  mutate_at(vars(CBL, d, alphaPost, alphaAnt, Dpost, Dant, PercSquish, predNmm), ~ replace(.x, is.na(.x), mean(.x, na.rm=TRUE))) %>%
+  ungroup()
+
+my.data.rotated <-
+my.data.rotated %>%
+  pivot_wider(names_from = Pos, values_from = c('CBL', 'alphaPost', 'alphaAnt', 'd', 'Dpost','Dant', 'PercSquish',"predNmm"))
+```
+
+# Make Predictions based on Dana's tree Data
+```{r}
+treePredictions <- function(data){
+  preproc.param <- data %>% preProcess(method = c("center", "scale"))
+  transformed <- preproc.param %>% predict(data, method = "predictive")
+  
+  # Fit the model
+  model <- lda(Habitat_FishBase~., data = transformed)
+  
+  testPredictions<- predict(model, transformed, method = "predictive")
+  accuracy<- mean(na.omit(testPredictions$class==transformed$Habitat_FishBase))
+  
+  out <- list(model, testPredictions, accuracy)
+}
+
+treeLM.Linear <- treePredictions(my.data.rotated[c(2:26)])
+treeLM.Perc <- treePredictions(my.data.rotated[c(2:30)])
+treeLM.Pred <- treePredictions(my.data.rotated[c(2:26,31:34)])
+
+# treeLM.Linear[[3]]
+# treeLM.Perc[[3]]
+# treeLM.Pred[[3]]
+
+## Without Function = 0.7123
+## With Perc Squish = 0.7945
+## With predNmm = 0.7945205
+
+habitatPredictions<- as.data.frame(treeLM.Perc[[2]]$class)
+habitatKnown <- my.data.rotated$Habitat_FishBase
+```
+
+# Tree Plot
+NOTE: Sometimes you get "Null" in the terminal when you run this chunk. If you do, just re-run one line at a time.
+```{r}
+pdf("HabTree.pdf", 15, 15)
+
+x = as.matrix(habitatPredictions)
+y = as.matrix(habitatKnown)
+Y = cbind(x,y)
+
+# cols<-setNames(RColorBrewer::brewer.pal(n=8,"Accent"),
+#     unique(as.vector(sapply(as.factor(Y),levels))))
+rownames(Y) <- (my.data.rotated$Species)
+dotTree(tree,Y)
+
+dev.off()
+```
+
+# Real Vert Bendint Plot
+```{r}
+realData <- filter(vertData, Type == "Real")
+greys<-gray.colors(5, start = 0, end = 0.85)
+
+f1 <- ggplot(realData, aes(x = PercSquish, y = Npermm))+
+  geom_jitter(size = 2, aes(color = Species))+
+  scale_color_manual(values = greys)+
+  geom_smooth(method = "lm", se = FALSE)+
+  theme_classic()+
+  theme(text = element_text(size=10))+
+  xlab("S:H ratio") + ylab("Force to break (N/mm)")
+
+ggsave("ForceToBreak.eps", f1, width = 4, height = 2, units = "in")
+```
+
